@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# App data (user settings, model cache)
+settings.json
+
+# Installer output
+output/
+
+# Inno Setup compiled files
+*.exe
+
+# Logs
+*.log
