@@ -1,7 +1,8 @@
 """
 Buki — Voice to Text
 Push-to-talk dictation powered by faster-whisper.
-Hold Mouse 5 to record. Release to transcribe and paste.
+Hold the configured hotkey to record. Release to transcribe and paste.
+Default hotkey: Insert
 """
 
 import sys
@@ -33,14 +34,15 @@ import pystray
 import customtkinter as ctk
 from PIL import Image, ImageDraw
 from pynput.mouse import Button, Listener as MouseListener
+from pynput.keyboard import Key, KeyCode, Listener as KeyboardListener
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-APP_DIR      = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Buki")
+APP_DIR       = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Buki")
 SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
 os.makedirs(APP_DIR, exist_ok=True)
 
 # ── Settings ──────────────────────────────────────────────────────────────────
-DEFAULT_SETTINGS = {"device": "auto", "model": "auto"}
+DEFAULT_SETTINGS = {"device": "auto", "model": "auto", "hotkey": "key:insert"}
 
 def load_settings():
     if os.path.exists(SETTINGS_FILE):
@@ -55,6 +57,38 @@ def load_settings():
 def save_settings(s):
     with open(SETTINGS_FILE, "w") as f:
         json.dump(s, f, indent=2)
+
+# ── Hotkey helpers ────────────────────────────────────────────────────────────
+_MOUSE_DISPLAY = {
+    "left": "Left Click", "right": "Right Click",
+    "middle": "Middle Click", "x1": "Mouse 4", "x2": "Mouse 5",
+}
+
+def parse_hotkey_str(s):
+    """Return (kind, value): kind in 'mouse'|'key'|'char'."""
+    try:
+        if s and s.startswith("mouse:"):
+            return ("mouse", getattr(Button, s[6:]))
+        elif s and s.startswith("key:"):
+            return ("key", getattr(Key, s[4:]))
+        elif s and s.startswith("char:"):
+            return ("char", KeyCode.from_char(s[5:]))
+    except AttributeError:
+        pass
+    return ("key", Key.insert)
+
+def hotkey_display_name(s):
+    if not s:
+        return "Insert"
+    if s.startswith("mouse:"):
+        name = s[6:]
+        return _MOUSE_DISPLAY.get(name, name.replace("_", " ").title())
+    elif s.startswith("key:"):
+        name = s[4:]
+        return name.replace("_", " ").title()
+    elif s.startswith("char:"):
+        return s[5:].upper()
+    return s
 
 # ── Hardware auto-detection ───────────────────────────────────────────────────
 def detect_hardware():
@@ -125,15 +159,19 @@ TRAY_IDLE = _make_tray_icon(False)
 TRAY_REC  = _make_tray_icon(True)
 
 # ── Global state ──────────────────────────────────────────────────────────────
-recording    = False
-audio_frames = []
-model_obj    = None
-tray_icon    = None
-app_gui      = None
-status_lock  = threading.Lock()
-ui_queue     = queue.Queue()
-SAMPLE_RATE  = 16000
-PUSH_BUTTON  = Button.x2   # Mouse 5 forward side button
+recording          = False
+audio_frames       = []
+model_obj          = None
+tray_icon          = None
+app_gui            = None
+status_lock        = threading.Lock()
+ui_queue           = queue.Queue()
+SAMPLE_RATE        = 16000
+
+_current_hotkey_str = "key:insert"   # updated from settings at startup / apply
+_trigger_down       = False           # tracks press state regardless of kind
+_capturing_hotkey   = False           # True while waiting for capture input
+_capture_queue      = queue.Queue()   # receives "kind:name" string from listeners
 
 # ── Model loader ──────────────────────────────────────────────────────────────
 def load_model(device, compute, model_size, on_done=None, on_error=None):
@@ -151,6 +189,9 @@ def audio_callback(indata, frames, time_info, status):
     if recording:
         audio_frames.append(indata.copy())
 
+def _hold_hint():
+    return f"Hold {hotkey_display_name(_current_hotkey_str)} to record"
+
 def start_recording():
     global audio_frames
     audio_frames = []
@@ -165,7 +206,7 @@ def stop_and_transcribe():
         tray_icon.title = "Buki — idle"
     ui_queue.put(("recording", False))
     if not audio_frames:
-        ui_queue.put(("status", "Hold Mouse 5 to record", "#555555"))
+        ui_queue.put(("status", _hold_hint(), "#555555"))
         return
     data = np.concatenate(audio_frames, axis=0).flatten().astype(np.float32)
     threading.Thread(target=_transcribe, args=(data,), daemon=True).start()
@@ -181,7 +222,7 @@ def _transcribe(audio_data):
         text = " ".join(seg.text.strip() for seg in segments).strip()
         if text:
             ui_queue.put(("log", f"[{info.language.upper()}] {text}", "ok"))
-            ui_queue.put(("status", "Hold Mouse 5 to record", "#555555"))
+            ui_queue.put(("status", _hold_hint(), "#555555"))
             prev = pyperclip.paste()
             pyperclip.copy(text)
             pyautogui.hotkey("ctrl", "v")
@@ -189,25 +230,68 @@ def _transcribe(audio_data):
             pyperclip.copy(prev)
         else:
             ui_queue.put(("log", "— no speech detected", "dim"))
-            ui_queue.put(("status", "Hold Mouse 5 to record", "#555555"))
+            ui_queue.put(("status", _hold_hint(), "#555555"))
     except Exception as e:
         ui_queue.put(("log", f"Error: {e}", "error"))
-        ui_queue.put(("status", "Hold Mouse 5 to record", "#555555"))
+        ui_queue.put(("status", _hold_hint(), "#555555"))
 
 # ── Mouse listener ────────────────────────────────────────────────────────────
-_btn_down = False
-
 def on_mouse_click(x, y, button, pressed):
-    global recording, _btn_down
-    if button != PUSH_BUTTON:
+    global recording, _trigger_down, _capturing_hotkey
+
+    # Capture mode: record and exit
+    if _capturing_hotkey and pressed:
+        _capture_queue.put(f"mouse:{button.name}")
         return
-    if pressed and not _btn_down:
-        _btn_down = True
+
+    kind, value = parse_hotkey_str(_current_hotkey_str)
+    if kind != "mouse" or button != value:
+        return
+
+    if pressed and not _trigger_down:
+        _trigger_down = True
         with status_lock:
             recording = True
         start_recording()
-    elif not pressed and _btn_down:
-        _btn_down = False
+    elif not pressed and _trigger_down:
+        _trigger_down = False
+        with status_lock:
+            recording = False
+        stop_and_transcribe()
+
+# ── Keyboard listener ─────────────────────────────────────────────────────────
+def on_key_press(key):
+    global recording, _trigger_down, _capturing_hotkey
+
+    # Capture mode: record and exit
+    if _capturing_hotkey:
+        if isinstance(key, Key):
+            _capture_queue.put(f"key:{key.name}")
+        elif isinstance(key, KeyCode) and key.char:
+            _capture_queue.put(f"char:{key.char}")
+        return
+
+    kind, value = parse_hotkey_str(_current_hotkey_str)
+    if kind not in ("key", "char"):
+        return
+    if key != value:
+        return
+    if not _trigger_down:
+        _trigger_down = True
+        with status_lock:
+            recording = True
+        start_recording()
+
+def on_key_release(key):
+    global recording, _trigger_down
+
+    kind, value = parse_hotkey_str(_current_hotkey_str)
+    if kind not in ("key", "char"):
+        return
+    if key != value:
+        return
+    if _trigger_down:
+        _trigger_down = False
         with status_lock:
             recording = False
         stop_and_transcribe()
@@ -245,7 +329,7 @@ MODEL_DESCRIPTIONS = {
 }
 
 class BukiApp(ctk.CTk):
-    W, H = 320, 400
+    W, H = 320, 420
 
     def __init__(self):
         super().__init__()
@@ -296,8 +380,8 @@ class BukiApp(ctk.CTk):
 
         # header buttons right-to-left
         for symbol, cmd, hover in [
-            ("✕", self._on_close,   "#3a1010"),
-            ("─", self._minimize,   "#222222"),
+            ("✕", self._on_close,      "#3a1010"),
+            ("─", self._minimize,      "#222222"),
             ("⚙", self._show_settings, "#1e2a1e"),
         ]:
             ctk.CTkButton(hdr, text=symbol, width=32, height=28,
@@ -338,8 +422,12 @@ class BukiApp(ctk.CTk):
                                    wrap="word", state="disabled")
         self._log.pack(padx=16, pady=(0, 10))
 
-        ctk.CTkLabel(self._main_frame, text="Hold Mouse 5 · push to talk",
-                     font=("Segoe UI", 9), text_color="#2a2a2a").pack(pady=(0, 8))
+        self._hold_label = ctk.CTkLabel(
+            self._main_frame,
+            text=_hold_hint(),
+            font=("Segoe UI", 9), text_color="#2a2a2a"
+        )
+        self._hold_label.pack(pady=(0, 8))
 
     def _build_settings(self):
         self._settings_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -366,6 +454,28 @@ class BukiApp(ctk.CTk):
         body = ctk.CTkFrame(self._settings_frame, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=20, pady=16)
 
+        # ── Hotkey
+        ctk.CTkLabel(body, text="HOTKEY", font=("Segoe UI", 9),
+                     text_color="#444444").pack(anchor="w", pady=(0, 6))
+
+        current_hk = self._settings.get("hotkey", "key:insert")
+        self._hotkey_btn = ctk.CTkButton(
+            body,
+            text=f"[ {hotkey_display_name(current_hk)} ]",
+            width=280, height=36,
+            fg_color="#1a1a1a", hover_color="#252525",
+            font=("Segoe UI Semibold", 13),
+            command=self._capture_hotkey_start,
+        )
+        self._hotkey_btn.pack(pady=(0, 4))
+
+        self._hotkey_hint = ctk.CTkLabel(
+            body, text="Click to reassign · supports keys and mouse buttons",
+            font=("Segoe UI", 9), text_color="#3a3a3a",
+            wraplength=270, justify="left",
+        )
+        self._hotkey_hint.pack(anchor="w", pady=(0, 14))
+
         # ── Device
         ctk.CTkLabel(body, text="DEVICE", font=("Segoe UI", 9),
                      text_color="#444444").pack(anchor="w", pady=(0, 6))
@@ -383,7 +493,7 @@ class BukiApp(ctk.CTk):
         self._device_hint = ctk.CTkLabel(body, text=self._device_hint_text(),
                                          font=("Segoe UI", 9), text_color="#3a3a3a",
                                          wraplength=270, justify="left")
-        self._device_hint.pack(anchor="w", pady=(0, 18))
+        self._device_hint.pack(anchor="w", pady=(0, 14))
         self._device_var.trace_add("write", lambda *_: self._device_hint.configure(
             text=self._device_hint_text()))
 
@@ -408,12 +518,12 @@ class BukiApp(ctk.CTk):
             font=("Segoe UI", 9), text_color="#3a3a3a",
             wraplength=270, justify="left"
         )
-        self._model_hint.pack(anchor="w", pady=(0, 24))
+        self._model_hint.pack(anchor="w", pady=(0, 14))
 
         # ── Hardware info
         self._hw_label = ctk.CTkLabel(body, text="", font=("Consolas", 9),
                                       text_color="#2e2e2e", wraplength=270, justify="left")
-        self._hw_label.pack(anchor="w", pady=(0, 20))
+        self._hw_label.pack(anchor="w", pady=(0, 10))
         threading.Thread(target=self._fill_hw_info, daemon=True).start()
 
         # ── Apply
@@ -425,6 +535,40 @@ class BukiApp(ctk.CTk):
         self._apply_status = ctk.CTkLabel(body, text="", font=("Segoe UI", 9),
                                           text_color="#555555")
         self._apply_status.pack(pady=(8, 0))
+
+    # ── Hotkey capture ────────────────────────────────────────────────────────
+    def _capture_hotkey_start(self):
+        global _capturing_hotkey
+        # Drain any stale entries
+        while not _capture_queue.empty():
+            try:
+                _capture_queue.get_nowait()
+            except queue.Empty:
+                break
+        _capturing_hotkey = True
+        self._hotkey_btn.configure(
+            text="Press any key or mouse button...",
+            fg_color="#1e2a3e",
+        )
+        self._hotkey_hint.configure(text="Listening for input...")
+        self.after(100, self._capture_hotkey_poll)
+
+    def _capture_hotkey_poll(self):
+        global _capturing_hotkey
+        try:
+            result = _capture_queue.get_nowait()
+            _capturing_hotkey = False
+            self._settings["hotkey"] = result
+            self._hotkey_btn.configure(
+                text=f"[ {hotkey_display_name(result)} ]",
+                fg_color="#1a1a1a",
+            )
+            self._hotkey_hint.configure(
+                text="Click to reassign · supports keys and mouse buttons"
+            )
+        except queue.Empty:
+            if _capturing_hotkey:
+                self.after(100, self._capture_hotkey_poll)
 
     # ── View switching ────────────────────────────────────────────────────────
     def _show_main(self):
@@ -471,15 +615,24 @@ class BukiApp(ctk.CTk):
         self._hw_label.configure(text="\n".join(lines))
 
     def _apply_settings(self):
+        global _current_hotkey_str, _trigger_down
         new_settings = {
             "device": self._device_var.get(),
             "model":  self._model_var.get(),
+            "hotkey": self._settings.get("hotkey", "key:insert"),
         }
         save_settings(new_settings)
         self._settings = new_settings
+
+        # Apply hotkey immediately
+        _current_hotkey_str = new_settings["hotkey"]
+        _trigger_down = False   # reset any stuck state
+        self._hold_label.configure(text=_hold_hint())
+
         self._apply_status.configure(text="Reloading model...", text_color="#668866")
         self._show_main()
         ui_queue.put(("log", f"Reloading: device={new_settings['device']} model={new_settings['model']}", "dim"))
+        ui_queue.put(("log", f"Hotkey set to: {hotkey_display_name(new_settings['hotkey'])}", "dim"))
         ui_queue.put(("status", "Reloading model...", "#556655"))
         threading.Thread(target=self._reload_model, daemon=True).start()
 
@@ -487,7 +640,8 @@ class BukiApp(ctk.CTk):
         device, compute, model_size = resolve_config(self._settings)
         load_model(
             device, compute, model_size,
-            on_done=lambda d, c, m: ui_queue.put(("model_ready", d, c, m)),            on_error=lambda e:      ui_queue.put(("log", f"Load error: {e}", "error")),
+            on_done=lambda d, c, m: ui_queue.put(("model_ready", d, c, m)),
+            on_error=lambda e:      ui_queue.put(("log", f"Load error: {e}", "error")),
         )
 
     # ── UI queue processor ────────────────────────────────────────────────────
@@ -526,8 +680,7 @@ class BukiApp(ctk.CTk):
                     d, c, m = msg[1], msg[2], msg[3]
                     label = f"{m}  ·  {d}  ·  {c}"
                     self._model_info.configure(text=label, text_color="#334433")
-                    self._status.configure(text="Hold Mouse 5 to record",
-                                           text_color="#555555")
+                    self._status.configure(text=_hold_hint(), text_color="#555555")
                     self._append_log(f"Ready: {label}", "ok")
         except queue.Empty:
             pass
@@ -578,14 +731,17 @@ class BukiApp(ctk.CTk):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
-    global app_gui
+    global app_gui, _current_hotkey_str
 
     settings = load_settings()
+    _current_hotkey_str = settings.get("hotkey", "key:insert")
+
     device, compute, model_size = resolve_config(settings)
 
     app_gui = BukiApp()
     ui_queue.put(("log", f"Loading {model_size} · {device} · {compute}...", "dim"))
     ui_queue.put(("log", "(first run downloads the model, please wait)", "dim"))
+    ui_queue.put(("log", f"Hotkey: {hotkey_display_name(_current_hotkey_str)}", "dim"))
     ui_queue.put(("status", f"Loading {model_size}...", "#446644"))
     app_gui.update()
     app_gui.after(200, app_gui._start_loading_spinner)
@@ -610,11 +766,15 @@ def main():
     mouse_listener = MouseListener(on_click=on_mouse_click)
     mouse_listener.start()
 
+    keyboard_listener = KeyboardListener(on_press=on_key_press, on_release=on_key_release)
+    keyboard_listener.start()
+
     threading.Thread(target=run_tray, daemon=True).start()
 
     app_gui.mainloop()
     stream.stop()
     mouse_listener.stop()
+    keyboard_listener.stop()
 
 
 if __name__ == "__main__":
