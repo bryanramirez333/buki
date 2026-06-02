@@ -451,8 +451,14 @@ class BukiApp(ctk.CTk):
                       text_color="#777777", font=("Segoe UI", 13),
                       command=self._on_close).pack(side="right", padx=8)
 
-        body = ctk.CTkFrame(self._settings_frame, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=20, pady=16)
+        body = ctk.CTkScrollableFrame(self._settings_frame, fg_color="transparent",
+                                      scrollbar_button_color="#222222",
+                                      scrollbar_button_hover_color="#333333")
+        body.pack(fill="both", expand=True, padx=0, pady=8)
+        # inner padding via a child frame so content has left/right margin
+        _inner = ctk.CTkFrame(body, fg_color="transparent")
+        _inner.pack(fill="both", expand=True, padx=16)
+        body = _inner
 
         # ── Hotkey
         ctk.CTkLabel(body, text="HOTKEY", font=("Segoe UI", 9),

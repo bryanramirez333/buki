@@ -1,7 +1,7 @@
 # Buki — Voice to Text
 
 Push-to-talk dictation for Windows, powered by [faster-whisper](https://github.com/SYSTRAN/faster-whisper).  
-Hold **Mouse 5** (front side button) → speak → release → text pastes wherever your cursor is.
+Hold **Insert** (default, configurable) → speak → release → text pastes wherever your cursor is.
 
 ---
 
@@ -34,9 +34,9 @@ No admin required. Installs to `%LOCALAPPDATA%\Buki\`.
 
 | Action | Result |
 |---|---|
-| Hold **Mouse 5** | Start recording (red dot) |
-| Release **Mouse 5** | Transcribe and paste text |
-| **⚙ Settings** | Change device (CPU/GPU) and model |
+| Hold **Insert** *(or your configured key)* | Start recording (red dot) |
+| Release | Transcribe and paste text |
+| **⚙ Settings** | Change hotkey, device (CPU/GPU), and model |
 | **─** button | Minimize to tray |
 | Tray → **Show** | Restore window |
 | Tray → **Quit** | Exit (frees VRAM for gaming) |
@@ -60,6 +60,8 @@ No admin required. Installs to `%LOCALAPPDATA%\Buki\`.
 
 Open with the **⚙** button in the top-right corner.
 
+- **Hotkey**: any keyboard key or mouse button (default: `Insert`)  
+  Click the button and press any key or mouse button to reassign.
 - **Device**: `Auto` / `CPU` / `GPU`  
   Use `CPU` to simulate the experience on a laptop without a GPU.
 - **Model**: `Auto` / `tiny` / `small` / `medium` / `large-v3-turbo`
@@ -70,7 +72,7 @@ Changes apply after clicking **Apply & Reload Model**.
 
 ## How it works
 
-1. You hold Mouse 5 → audio is captured from your default microphone
+1. You hold the configured hotkey → audio is captured from your default microphone
 2. You release → audio is sent to [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (runs locally, no internet)
 3. Transcription is copied to clipboard and pasted via `Ctrl+V` into the active window
 4. Clipboard is restored immediately after
