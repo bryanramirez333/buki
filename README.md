@@ -8,8 +8,8 @@ Hold **Insert** (default, configurable) → speak → release → text pastes wh
 ## Download & Install
 
 1. Go to [**Releases**](../../releases/latest)
-2. Download `Buki-Setup.zip`
-3. Extract and double-click **`Install Buki.bat`**
+2. Download **`Buki-Setup.exe`**
+3. Run it — no admin required, installs to `%LOCALAPPDATA%\Buki\`
 4. Wait ~2 min on first run (downloads the AI model, ~500 MB–1.6 GB depending on settings)
 5. Buki appears in your system tray and bottom-right corner
 
