@@ -560,18 +560,32 @@ class BukiApp(ctk.CTk):
         self.after(100, self._capture_hotkey_poll)
 
     def _capture_hotkey_poll(self):
-        global _capturing_hotkey
+        global _capturing_hotkey, _current_hotkey_str, _trigger_down
         try:
             result = _capture_queue.get_nowait()
             _capturing_hotkey = False
+
+            # Apply immediately — no Apply button needed for hotkey
+            _current_hotkey_str = result
+            _trigger_down = False
+
             self._settings["hotkey"] = result
+
+            # Persist to disk (merge with current device/model)
+            saved = {
+                "device": self._settings.get("device", "auto"),
+                "model":  self._settings.get("model",  "auto"),
+                "hotkey": result,
+            }
+            save_settings(saved)
+
+            name = hotkey_display_name(result)
             self._hotkey_btn.configure(
-                text=f"[ {hotkey_display_name(result)} ]",
+                text=f"[ {name} ]",
                 fg_color="#1a1a1a",
             )
-            self._hotkey_hint.configure(
-                text="Click to reassign · supports keys and mouse buttons"
-            )
+            self._hotkey_hint.configure(text=f"Saved. Click to reassign.")
+            self._hold_label.configure(text=_hold_hint())
         except queue.Empty:
             if _capturing_hotkey:
                 self.after(100, self._capture_hotkey_poll)
@@ -621,7 +635,7 @@ class BukiApp(ctk.CTk):
         self._hw_label.configure(text="\n".join(lines))
 
     def _apply_settings(self):
-        global _current_hotkey_str, _trigger_down
+        global _trigger_down
         new_settings = {
             "device": self._device_var.get(),
             "model":  self._model_var.get(),
@@ -629,11 +643,7 @@ class BukiApp(ctk.CTk):
         }
         save_settings(new_settings)
         self._settings = new_settings
-
-        # Apply hotkey immediately
-        _current_hotkey_str = new_settings["hotkey"]
-        _trigger_down = False   # reset any stuck state
-        self._hold_label.configure(text=_hold_hint())
+        _trigger_down = False
 
         self._apply_status.configure(text="Reloading model...", text_color="#668866")
         self._show_main()
